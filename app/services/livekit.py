@@ -1277,8 +1277,13 @@ class LiveKitClient:
             total_jobs = completed_count + failed_count
             success_rate = round((completed_count / total_jobs * 100), 1) if total_jobs > 0 else 100
 
-            # Storage used (mock data - would need actual metrics)
-            storage_used_gb = len(all_egress) * 0.5  # Mock: 500MB per job
+            # Storage used: sum of actual output file sizes reported by LiveKit
+            storage_used_bytes = sum(
+                file_result.size
+                for e in all_egress
+                for file_result in getattr(e, "file_results", [])
+            )
+            storage_used_gb = storage_used_bytes / (1024 ** 3)
 
             result = {
                 "active_jobs": active_count,
@@ -1310,22 +1315,48 @@ class LiveKitClient:
             ingress_list = await self.list_ingress()
             logger.debug("get_ingress_analytics: found %d ingress items", len(ingress_list))
 
+            from livekit.protocol.ingress import IngressInput, IngressState
+
             # Calculate statistics
             total_ingress = len(ingress_list)
             active_ingress = len(
-                [i for i in ingress_list if getattr(i, "state", None) == 1]
-            )  # INGRESS_STATE_ENDPOINT_PUBLISHED
+                [
+                    i
+                    for i in ingress_list
+                    if getattr(i, "state", None)
+                    and i.state.status == IngressState.Status.ENDPOINT_PUBLISHING
+                ]
+            )
 
-            # Ingress types (mock distribution)
+            # Ingress types from the actual input_type reported by LiveKit
+            type_names = {
+                IngressInput.RTMP_INPUT: "rtmp",
+                IngressInput.WHIP_INPUT: "whip",
+                IngressInput.URL_INPUT: "url",
+            }
             ingress_types = {"rtmp": 0, "whip": 0, "url": 0}
-            for ingress in ingress_list:
-                # This would need to check actual ingress type from the protocol
-                # For now, using mock distribution
-                ingress_types["rtmp"] += 1
+            for item in ingress_list:
+                key = type_names.get(getattr(item, "input_type", None))
+                if key:
+                    ingress_types[key] += 1
 
-            # Connection quality (mock data)
-            avg_bitrate_mbps = 2.5
-            connection_stability = 98.5
+            # Connection quality averaged from actively publishing streams;
+            # LiveKit doesn't report bitrate/stability for inactive ingress.
+            active_video_bitrates = [
+                i.state.video.average_bitrate
+                for i in ingress_list
+                if getattr(i, "state", None)
+                and i.state.status == IngressState.Status.ENDPOINT_PUBLISHING
+                and i.state.video.average_bitrate
+            ]
+            avg_bitrate_mbps = (
+                round((sum(active_video_bitrates) / len(active_video_bitrates)) / 1_000_000, 2)
+                if active_video_bitrates
+                else 0
+            )
+            connection_stability = (
+                round((active_ingress / total_ingress) * 100, 1) if total_ingress > 0 else 100
+            )
 
             result = {
                 "total_ingress": total_ingress,
@@ -1372,17 +1403,18 @@ class LiveKitClient:
     # Enhanced Analytics (combining real-time + historical)
     async def get_enhanced_analytics(self) -> dict:
         """
-        Get enhanced analytics combining real-time data with historical data.
-        This provides the most comprehensive view.
+        Get enhanced analytics derived from real-time room data.
+
+        LiveKit's server APIs don't expose per-participant platform/OS or
+        WebRTC-vs-TURN connection-type breakdowns, and this app keeps no
+        historical session data, so `platforms`, `connection_types`, and
+        `connection_minutes` are left empty/zero rather than estimated —
+        templates render a "no data" state for the empty collections.
         """
         try:
             # Get real-time data
             room_analytics = await self.get_room_analytics()
 
-            # Get webhook data (if available)
-            webhook_analytics = await self.get_webhook_analytics()
-
-            # Calculate enhanced metrics
             total_participants = room_analytics.get("total_participants", 0)
             total_rooms = room_analytics.get("total_rooms", 0)
 
@@ -1393,39 +1425,11 @@ class LiveKitClient:
             else:
                 connection_success = 100
 
-            # Estimate platforms based on room patterns
-            platforms = {}
-            if total_participants > 0:
-                # Realistic distribution for demo
-                platforms = {
-                    "Web": int(total_participants * 0.6),
-                    "iOS": int(total_participants * 0.2),
-                    "Android": int(total_participants * 0.15),
-                    "React Native": int(total_participants * 0.05),
-                }
-            else:
-                # Sample data when no participants
-                platforms = {"Web": 8, "iOS": 3, "Android": 2, "React Native": 1}
-
-            # Connection types based on LiveKit deployment
-            connection_types = (
-                {
-                    "WebRTC Direct": max(1, int(total_participants * 0.7)),
-                    "TURN Relay": max(1, int(total_participants * 0.3)),
-                }
-                if total_participants > 0
-                else {"WebRTC Direct": 10, "TURN Relay": 4}
-            )
-
-            # Estimate connection minutes
-            avg_session_minutes = 25  # Average session length
-            connection_minutes = total_participants * avg_session_minutes
-
             return {
                 "connection_success": connection_success,
-                "connection_minutes": connection_minutes,
-                "platforms": platforms,
-                "connection_types": connection_types,
+                "connection_minutes": 0,
+                "platforms": {},
+                "connection_types": {},
                 "enhanced": True,
                 "participant_count": total_participants,
                 "room_count": total_rooms,
@@ -1433,12 +1437,11 @@ class LiveKitClient:
 
         except Exception as e:
             logger.warning("Error getting enhanced analytics: %s", e)
-            # Fallback to sample data
             return {
-                "connection_success": 95.8,
-                "connection_minutes": 237,
-                "platforms": {"Web": 12, "iOS": 5, "Android": 3, "React Native": 2},
-                "connection_types": {"WebRTC Direct": 15, "TURN Relay": 7},
+                "connection_success": 0,
+                "connection_minutes": 0,
+                "platforms": {},
+                "connection_types": {},
                 "enhanced": True,
                 "participant_count": 0,
                 "room_count": 0,

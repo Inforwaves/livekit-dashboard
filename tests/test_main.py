@@ -61,6 +61,44 @@ def test_sandbox_requires_auth(client):
     assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
 
+def test_settings_reflects_sip_enabled(client, auth_headers, monkeypatch):
+    """Settings page must reflect the real ENABLE_SIP value, not always 'Disabled'."""
+    monkeypatch.setenv("ENABLE_SIP", "true")
+    mock_server_info = {"status": "healthy", "rooms_count": 0, "participants_count": 0, "sdk_latency_ms": 1.0}
+
+    with patch(
+        "app.services.livekit.LiveKitClient.get_server_info",
+        new=AsyncMock(return_value=mock_server_info),
+    ):
+        response = client.get("/settings", headers=auth_headers)
+
+    assert response.status_code == status.HTTP_200_OK
+    assert "SIP Telephony" in response.text
+    body = response.text
+    sip_row = body[body.index("SIP Telephony"):body.index("SIP Telephony") + 300]
+    assert "Enabled" in sip_row
+    assert "Disabled" not in sip_row
+
+
+def test_settings_masks_api_credentials(client, auth_headers, monkeypatch):
+    """Settings page must show masked API key/secret, never the raw values."""
+    monkeypatch.setenv("LIVEKIT_API_KEY", "APIabcdefghij")
+    monkeypatch.setenv("LIVEKIT_API_SECRET", "supersecretvalue1234")
+    mock_server_info = {"status": "healthy", "rooms_count": 0, "participants_count": 0, "sdk_latency_ms": 1.0}
+
+    with patch(
+        "app.services.livekit.LiveKitClient.get_server_info",
+        new=AsyncMock(return_value=mock_server_info),
+    ):
+        response = client.get("/settings", headers=auth_headers)
+
+    assert response.status_code == status.HTTP_200_OK
+    assert "APIabcdefghij" not in response.text
+    assert "supersecretvalue1234" not in response.text
+    assert "APIa" in response.text and "ghij" in response.text
+    assert "supe" in response.text and "1234" in response.text
+
+
 def test_overview_export_json(client, auth_headers):
     """Overview export endpoint returns a JSON snapshot."""
     from app.services.dashboard import DashboardStats
